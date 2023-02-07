@@ -1,2 +1,2 @@
 # ising_model
-ASCII visualized ising model simulation
+* ASCII visualized ising model simulation
