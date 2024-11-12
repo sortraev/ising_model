@@ -8,183 +8,156 @@
 #include <signal.h>  // signal()
 #include <sys/ioctl.h>
 #include <termios.h>
+#include <errno.h>
 
 #include <stdint.h>
-
 
 // visualization stuff. ignore this.
 #define MIN_FPS 4
 #define MAX_FPS 60
 #define DO_COLOR 1
+int FPS = 24;
+
+// screen (and simulation grid) dimensions.
+int H = 10;
+int W = 10;
+int W0; // width of internal string representation.
+
+int RUNNING = 1;
 
 #define COLOR_BLUE  "\x1b[33m"
 #define COLOR_RED   "\x1b[31m"
 #define RESET_COLOR "\x1b[0m"
 
-#define RAND_UNIFORM() ((float) rand() / RAND_MAX)
 #define MAX(x, y) ((x) >  (y) ? (x) : (y))
 #define MIN(x, y) ((x) <= (y) ? (x) : (y))
 
 typedef char spin;
 typedef char energy;
 
-// ferromagnet grid dimensions.
-int H = 1;
-int W = 1;
-int FPS = 24;
-int W0; // width of internal string representation.
-
 void init_spins(spin *spins);
 void compute_energies(spin *spins, energy *energies);
 void update_spins(energy *energies, spin *spins);
 void render(spin *spins, char *screen);
 
-void *user_input_thread(void *_unused);
-void sigint_handler(int sig);
-void set_raw_mode();
-void set_cooked_mode();
-
-static inline char char_abs(char x) {
-  char sign_bit = x >> 7;
-  return (x ^ sign_bit) - sign_bit;
-}
-
-struct termios orig_termios;
+void *user_input_handler_thread(void *_unused);
+int init();
 
 // simulation parameters.
-const double T_INC = 0.004;
-const double P_INC = 0.002;
 double T = 0.5;
 double P = 0.1;
-int RUNNING = 1;
 
 int main() {
 
-  if (signal(SIGINT, sigint_handler) != 0) {
-    fprintf(stderr, "Error setting SIGINT handler.\n");
-    exit(1);
+  if (init() != 0) {
+    return 1;
   }
-  struct winsize w;
-  ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-  H = w.ws_row - 1;
-  W = w.ws_col;
 
-  W0 = W + 1;
-  srand(43);
-
-  pthread_t thd1;
-  if (pthread_create(&thd1, NULL, user_input_thread, NULL) != 0) {
-    fprintf(stderr, "pthread_create error\n");
-    exit(1);
-  }
 
   energy *energies = calloc(H * W0, sizeof(energy));
-  spin *spins = malloc(H * W * sizeof(spin));
+  spin   *spins    = malloc(H * W * sizeof(spin));
 
   init_spins(spins);
 
-#if DO_COLOR
-  printf(COLOR_RED); // red color output.
-#endif
-
-  set_raw_mode();
   while (RUNNING) {
     compute_energies(spins, energies);
     update_spins(energies, spins);
 
     render(spins, energies);
     fwrite(energies, sizeof(char), H * W0, stdout);
+
     printf("\n (T, P, FPS) = (%lf, %lf, %d)", T, P, FPS);
     printf("\r\033[%dA", H + 1);
     usleep((1000000 / FPS));
   }
-  set_cooked_mode();
-
-
-#if DO_COLOR
-  printf("\033[%dB%s\n", H, RESET_COLOR);
-#endif
 
   free(spins);
   free(energies);
 }
 
-
 void init_spins(spin *spins) {
   for (int i = 0; i < H * W; i++)
-      spins[i] = (rand() & 2) - 1; // random zeroes and ones.
+    spins[i] = (rand() & 2) - 1; // -1 and 1.
 }
 
-
-// optimized version of compute_energies(), which runs about 2-6x
-// faster than its arguably prettier and better readable counterpart.
+// compute energies for each spin based on its 8 neighbors.
 void compute_energies(spin *spins, energy *energies) {
-  int x, y, z;
-  y = 0;
   for (int i = 0; i < H; i++) {
+    // offsets of this row, the previous, and the next (with wrap-around).
+    int this_row = i                 * W;
+    int prev_row = ((i + H - 1) % H) * W;
+    int next_row = ((i + 1) % H)     * W;
 
-    x = ((i + H - 1) % H) * W;
-    z = ((i + 1) % H)     * W;
 
-    spin ul = spins[x + W - 1];
-    spin u  = spins[x];
-    spin ur = spins[x + 1];
-    spin l  = spins[y + W - 1];
-    spin c  = spins[y];
-    spin r  = spins[y + 1];
-    spin dl = spins[z + W - 1];
-    spin d  = spins[z];
-    spin dr = spins[z + 1];
+    // inner loop is unrolled to avoid expensive mod operations.
+    spin ul = spins[prev_row + W - 1]; // wrap around columns.
+    spin u  = spins[prev_row        ];
+    spin ur = spins[prev_row     + 1];
 
-    energies[i + y] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
+    spin l  = spins[this_row + W - 1]; // wrap around columns.
+    spin c  = spins[this_row        ];
+    spin r  = spins[this_row     + 1];
 
-    for (int j = 1; j < W - 1; j++) {
+    spin dl = spins[next_row + W - 1]; // wrap around columns.
+    spin d  = spins[next_row        ];
+    spin dr = spins[next_row     + 1];
 
-      ul = spins[x + j - 1];
-      u  = spins[x + j];
-      ur = spins[x + j + 1];
-      l  = spins[y + j - 1];
-      c  = spins[y + j];
-      r  = spins[y + j + 1];
-      dl = spins[z + j - 1];
-      d  = spins[z + j];
-      dr = spins[z + j + 1];
+    int j = 0;
+    energies[i * W0 + j] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
+    for (j = 1; j < W - 1; j++) {
 
-      energies[y + i + j] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
+      ul = spins[prev_row + j - 1];
+      u  = spins[prev_row + j    ];
+      ur = spins[prev_row + j + 1];
+
+      l  = spins[this_row + j - 1];
+      c  = spins[this_row + j    ];
+      r  = spins[this_row + j + 1];
+
+      dl = spins[next_row + j - 1];
+      d  = spins[next_row + j    ];
+      dr = spins[next_row + j + 1];
+
+      energies[i * W0 + j] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
     }
 
-    x += W;
-    y += W;
-    z += W;
+    ul = spins[prev_row + j - 1];
+    u  = spins[prev_row + j    ];
+    ur = spins[prev_row + 0    ];
 
-    ul = spins[x - 2];
-    u  = spins[x - 1];
-    ur = spins[x - W];
-    l  = spins[y - 2];
-    c  = spins[y - 1];
-    r  = spins[y - W];
-    dl = spins[z - 2];
-    d  = spins[z - 1];
-    dr = spins[z - W];
+    l  = spins[this_row + j - 1];
+    c  = spins[this_row + j    ];
+    r  = spins[this_row + 0    ];
 
-    energies[y + i - 1] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
+    dl = spins[next_row + j - 1];
+    d  = spins[next_row + j    ];
+    dr = spins[next_row        ];
 
+    energies[i * W0 + j] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
   }
+}
+
+float rand_uniform() {
+  return (float) rand() / RAND_MAX;
+}
+
+char char_abs(char x) {
+  char sign_bit = x >> 7;
+  return (x ^ sign_bit) - sign_bit;
 }
 
 // update the grid of spins based on the current grid of energies.
 void update_spins(energy *energies, spin *spins) {
   for (int i = 0; i < H; i++) {
     for (int j = 0; j < W; j++) {
-      energy e;
+      energy e = energies[i * W0 + j];
       spins[i * W + j] *=
-        !(RAND_UNIFORM() < P &&
-          ((e = energies[i * W0 + j]) < 0 ||
-          RAND_UNIFORM() < exp((float) -e / T))) * 2 - 1;
+        (!(rand_uniform() < P &&
+          (e < 0 ||
+          rand_uniform() < exp((float) -e / T))) << 1) - 1;
     }
   }
 }
-
 
 // "render" the grid of spins by filling the energies array with symbols.
 void render(spin *spins, char *energies) {
@@ -196,13 +169,7 @@ void render(spin *spins, char *energies) {
                  * (spins[i * W + j] > 0)];
 }
 
-void sigint_handler(int _sig) {
-  (void) _sig;
-  RUNNING = 0;
-}
-
-
-void *user_input_thread(void *_unused) {
+void *user_input_handler_thread(void *_unused) {
   (void) _unused;
   char c;
   while (1) {
@@ -227,44 +194,76 @@ void *user_input_thread(void *_unused) {
   }
 }
 
-
-
-// lifted from the internet.
-void set_cooked_mode() {
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-  printf("\r(set cooked mode)\n");
-  printf("\e[?25h");
+void sigint_handler(int _sig) {
+  (void) _sig;
+  RUNNING = 0;
 }
-void set_raw_mode() {
-  atexit(set_cooked_mode);
-  struct termios raw;
 
-  raw = orig_termios;  /* copy original and then modify below */
+struct termios orig_termios;
+int set_terminal_raw_mode() {
+  struct termios raw = orig_termios;
+  raw.c_lflag &= ~(ECHO | ICANON);
+  return tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
 
-  /* input modes - clear indicated ones giving: no break, no CR to NL,
-     no parity check, no strip char, no start/stop output (sic) control */
-  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+void reset_terminal_mode() {
+#if DO_COLOR
+  printf("\033[%dB%s\n", H, RESET_COLOR);
+#endif
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
 
-  /* output modes - clear giving: no post processing such as NL to CR+NL */
-  raw.c_oflag &= ~(OPOST);
-
-  /* control modes - set 8 bit chars */
-  raw.c_cflag |= (CS8);
-
-  /* local modes - clear giving: echoing off, canonical off (no erase with
-     backspace, ^U,...),  no extended functions, no signal chars (^Z,^C) */
-  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-
-  /* control chars - set return condition: min number of bytes and timer */
-  raw.c_cc[VMIN] = 5; raw.c_cc[VTIME] = 8; /* after 5 bytes or .8 seconds
-                                              after first byte seen      */
-  raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 0; /* immediate - anything       */
-  raw.c_cc[VMIN] = 2; raw.c_cc[VTIME] = 0; /* after two bytes, no timer  */
-  raw.c_cc[VMIN] = 0; raw.c_cc[VTIME] = 8; /* after a byte or .8 seconds */
-
-  /* put terminal in raw mode after flushing */
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0) {
-    fprintf(stderr, "Failed to set raw mode\n");
-    exit(1);
+int init() {
+  /*
+   * check that we are writing to a tty; register SIGINT and exit handlers; init
+   * orig_termios (for proper resetting to cooked mode); and set raw mode.
+   */
+  if (!isatty(fileno(stdout))) {
+    fprintf(stderr, "stdout is not a tty\n");
+    return 1;
   }
+  if (signal(SIGINT, sigint_handler) != 0) {
+    fprintf(stderr, "Failed to set SIGINT handler: %s\n", strerror(errno));
+    return 1;
+  }
+  if (atexit(reset_terminal_mode) != 0) {
+    fprintf(stderr, "Failed to set atexit: %s\n", strerror(errno));
+    return 1;
+  }
+  if (tcgetattr(0, &orig_termios) != 0) {
+    fprintf(stderr, "Failed to get original termios: %s\n", strerror(errno));
+    return 1;
+  }
+  if (set_terminal_raw_mode() != 0) {
+    fprintf(stderr, "Failed to set raw mode: %s\n", strerror(errno));
+    return 1;
+  }
+  pthread_t thd1;
+  int pthread_create_errno =
+    pthread_create(&thd1, NULL, user_input_handler_thread, NULL);
+  if (pthread_create_errno != 0) {
+    fprintf(stderr, "Failed to start user input handler thread: %s \n",
+        strerror(pthread_create_errno));
+    return 1;
+  }
+
+  /*
+   * init window dimensions. keep defaults on failure.
+   */
+  struct winsize w;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) != -1) {
+    H = w.ws_row - 1;
+    W = w.ws_col;
+  }
+  W0 = W + 1;
+
+  /*
+   * misc stuff.
+   */
+#if DO_COLOR
+  printf(COLOR_RED); // red color output.
+#endif
+
+  srand(43);
+  return 0;
 }
