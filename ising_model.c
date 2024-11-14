@@ -15,7 +15,6 @@
 // visualization stuff. ignore this.
 #define MIN_FPS 4
 #define MAX_FPS 60
-#define DO_COLOR 1
 int FPS = 24;
 
 // screen (and simulation grid) dimensions.
@@ -24,10 +23,6 @@ int W = 10;
 int W0; // width of internal string representation.
 
 int RUNNING = 1;
-
-#define COLOR_BLUE  "\x1b[33m"
-#define COLOR_RED   "\x1b[31m"
-#define RESET_COLOR "\x1b[0m"
 
 #define MAX(x, y) ((x) >  (y) ? (x) : (y))
 #define MIN(x, y) ((x) <= (y) ? (x) : (y))
@@ -66,8 +61,8 @@ int main() {
     render(spins, energies);
     fwrite(energies, sizeof(char), H * W0, stdout);
 
-    printf("\n (T, P, FPS) = (%lf, %lf, %d)", T, P, FPS);
-    printf("\r\033[%dA", H + 1);
+    printf("\n(T, P, FPS) = (%lf, %lf, %2d)", T, P, FPS);
+    printf("\r\x1b[%dA", H + 1);
     usleep((1000000 / FPS));
   }
 
@@ -207,10 +202,9 @@ int set_terminal_raw_mode() {
 }
 
 void reset_terminal_mode() {
-#if DO_COLOR
-  printf("\033[%dB%s\n", H, RESET_COLOR);
-#endif
-  tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+  printf("\x1b[?1049l"); // switch back from alternate screen.
+  printf("\x1b[?25h");   // show cursor.
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios); // restore term attributes.
 }
 
 int init() {
@@ -226,12 +220,12 @@ int init() {
     fprintf(stderr, "Failed to set SIGINT handler: %s\n", strerror(errno));
     return 1;
   }
-  if (atexit(reset_terminal_mode) != 0) {
-    fprintf(stderr, "Failed to set atexit: %s\n", strerror(errno));
-    return 1;
-  }
   if (tcgetattr(0, &orig_termios) != 0) {
     fprintf(stderr, "Failed to get original termios: %s\n", strerror(errno));
+    return 1;
+  }
+  if (atexit(reset_terminal_mode) != 0) {
+    fprintf(stderr, "Failed to set atexit: %s\n", strerror(errno));
     return 1;
   }
   if (set_terminal_raw_mode() != 0) {
@@ -242,10 +236,11 @@ int init() {
   int pthread_create_errno =
     pthread_create(&thd1, NULL, user_input_handler_thread, NULL);
   if (pthread_create_errno != 0) {
-    fprintf(stderr, "Failed to start user input handler thread: %s \n",
-        strerror(pthread_create_errno));
+    fprintf(stderr, "Failed to start user input handler thread: %s\n",
+                    strerror(pthread_create_errno));
     return 1;
   }
+
 
   /*
    * init window dimensions. keep defaults on failure.
@@ -257,12 +252,8 @@ int init() {
   }
   W0 = W + 1;
 
-  /*
-   * misc stuff.
-   */
-#if DO_COLOR
-  printf(COLOR_RED); // red color output.
-#endif
+  printf("\x1b[?25l");   // hide cursor.
+  printf("\x1b[?1049h"); // switch to alternate screen.
 
   srand(43);
   return 0;
