@@ -1,4 +1,4 @@
-gcc_flags=-g -lm -pthread -lcurses -O3 -Wall -Wextra -pedantic
+gcc_flags=-g3 -lm -pthread -Wall -Wextra -pedantic
 
 EXE=ising_model
 SRC=$(EXE).c
@@ -12,4 +12,4 @@ $(EXE): $(SRC)
 	gcc $(gcc_flags) $< -o $@
 
 clean:
-	rm -rf $(EXE)
+	rm -rf $(EXE) vgcore*

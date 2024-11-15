@@ -12,31 +12,35 @@
 
 #include <stdint.h>
 
-// visualization stuff. ignore this.
-#define MIN_FPS 4
-#define MAX_FPS 60
-int FPS = 24;
-
-// screen (and simulation grid) dimensions.
-int H = 10;
-int W = 10;
-int W0; // width of internal string representation.
-
-int RUNNING = 1;
-
 #define MAX(x, y) ((x) >  (y) ? (x) : (y))
 #define MIN(x, y) ((x) <= (y) ? (x) : (y))
 
 typedef char spin;
 typedef char energy;
 
-void init_spins(spin *spins);
+void init_spins(spin *spins, size_t n);
 void compute_energies(spin *spins, energy *energies);
 void update_spins(energy *energies, spin *spins);
 void render(spin *spins, char *screen);
 
 void *user_input_handler_thread(void *_unused);
 int init();
+void window_resize();
+
+// visualization stuff.
+#define MIN_FPS 4
+#define MAX_FPS 60
+int FPS = 24;
+int running = 1;
+
+// screen (and simulation grid) dimensions.
+int H = 0;
+int W = 0;
+int W0 = 0; // width of internal string representation.
+int need_resize = 0;
+
+energy *energies = NULL;
+spin   *spins    = NULL;
 
 // simulation parameters.
 double T = 0.5;
@@ -48,31 +52,48 @@ int main() {
     return 1;
   }
 
+  energies = calloc(H * W0, sizeof(energy));
+  spins    = malloc(H * W * sizeof(spin));
 
-  energy *energies = calloc(H * W0, sizeof(energy));
-  spin   *spins    = malloc(H * W * sizeof(spin));
+  init_spins(spins, H * W);
 
-  init_spins(spins);
-
-  while (RUNNING) {
+  while (running) {
     compute_energies(spins, energies);
     update_spins(energies, spins);
 
     render(spins, energies);
     fwrite(energies, sizeof(char), H * W0, stdout);
 
-    printf("\n(T, P, FPS) = (%lf, %lf, %2d)", T, P, FPS);
-    printf("\r\x1b[%dA", H + 1);
-    usleep((1000000 / FPS));
+    printf("(T, P, FPS) = (%lf, %lf, %2d)", T, P, FPS);
+    printf("\r\x1b[%dA", H);
+    usleep(1000000 / FPS);
+    if (need_resize)
+      window_resize();
   }
 
   free(spins);
   free(energies);
 }
 
-void init_spins(spin *spins) {
-  for (int i = 0; i < H * W; i++)
-    spins[i] = (rand() & 2) - 1; // -1 and 1.
+void init_spins(spin *spins, size_t n) {
+
+  size_t m = n / sizeof(int);
+  for (size_t i = 0; i < m; i++) {
+    union { int as_int; spin ss[sizeof(int)]; } r =
+      { .as_int = rand() & 0x0202020202020202};
+
+    #pragma GCC unroll sizeof(int)
+    for (size_t k = 0; k < sizeof(int); k++)
+      r.ss[k] -= 1;
+
+    ((int*)spins)[i] = r.as_int;
+  }
+
+  size_t i = m * sizeof(int);
+  #pragma GCC unroll sizeof(int)
+  for (size_t k = 0; k < sizeof(int); k++)
+    if (i + k < n)
+      spins[i + k] = (rand() & 2) - 1;
 }
 
 // compute energies for each spin based on its 8 neighbors.
@@ -83,21 +104,20 @@ void compute_energies(spin *spins, energy *energies) {
     int prev_row = ((i + H - 1) % H) * W;
     int next_row = ((i + 1) % H)     * W;
 
-
     // inner loop is unrolled to avoid expensive mod operations.
+    int j = 0;
     spin ul = spins[prev_row + W - 1]; // wrap around columns.
-    spin u  = spins[prev_row        ];
-    spin ur = spins[prev_row     + 1];
+    spin u  = spins[prev_row + j    ];
+    spin ur = spins[prev_row + j + 1];
 
     spin l  = spins[this_row + W - 1]; // wrap around columns.
-    spin c  = spins[this_row        ];
-    spin r  = spins[this_row     + 1];
+    spin c  = spins[this_row + j    ];
+    spin r  = spins[this_row + j + 1];
 
     spin dl = spins[next_row + W - 1]; // wrap around columns.
-    spin d  = spins[next_row        ];
-    spin dr = spins[next_row     + 1];
+    spin d  = spins[next_row + j    ];
+    spin dr = spins[next_row + j + 1];
 
-    int j = 0;
     energies[i * W0 + j] = (c * (ul + u + ur + l + r + dl + d + dr)) << 1;
     for (j = 1; j < W - 1; j++) {
 
@@ -167,17 +187,17 @@ void render(spin *spins, char *energies) {
 void *user_input_handler_thread(void *_unused) {
   (void) _unused;
   char c;
-  while (1) {
+  while (running) {
     if (read(STDIN_FILENO, &c, 1) != 0) {
-      if (c == 'q') RUNNING = 0;
+      if (c == 'q') running = 0;
 
-      else if (c == 'z') P = MAX(P * 0.99, 0.0);
+      else if (c == 'z') P *= 0.99;
       else if (c == 'Z') P = MAX(P - 0.1, 0.0);
 
       else if (c == 'x') P = MIN(P * 1.01, 1.0);
       else if (c == 'X') P = MIN(P + 0.1, 1.0);
 
-      else if (c == 'a') T = MAX(T * 0.99, 0.0);
+      else if (c == 'a') T *= 0.99;
       else if (c == 'A') T = MAX(T - 0.1, 0.0);
 
       else if (c == 's') T *= 1.01;
@@ -187,11 +207,58 @@ void *user_input_handler_thread(void *_unused) {
       else if (c == 'f') FPS = MIN(FPS + 1, MAX_FPS);
     }
   }
+  return NULL;
 }
 
-void sigint_handler(int _sig) {
-  (void) _sig;
-  RUNNING = 0;
+int set_window_dims() {
+  struct winsize _winsize;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &_winsize) == -1)
+    return 1;
+  H = _winsize.ws_row - 1;
+  W = _winsize.ws_col;
+  W0 = W + 1;
+  return 0;
+}
+
+void window_resize() {
+  // update window dims, but first store the previous values.
+  int H_prev = H;
+  int W_prev = W;
+  int W0_prev = W_prev + 1;
+  set_window_dims();
+
+  energy *energies_new = calloc(H * W0, sizeof(energy));
+  spin   *spins_new    = malloc(H * W * sizeof(spin));
+
+  // number of new rows/columns (if any) we need to copy/initialize.
+  int h = MIN(H, H_prev);
+  int w = MIN(W, W_prev);
+
+  // copy existing energies/spins.
+  for (int i = 0; i < h; i++) {
+    memcpy(energies_new + i * W0, energies + i * W0_prev, w);
+    memcpy(spins_new    + i * W,  spins    + i * W_prev,  w);
+  }
+
+  // random-initialize the new spins.
+  for (int i = 0; i < h; i++)
+    init_spins(spins_new + i * W + w, W - w);
+  init_spins(spins_new + h * W, (H - h) * W);
+
+  // update energies and spins!
+  free(energies);
+  free(spins);
+  energies = energies_new;
+  spins    = spins_new;
+
+  need_resize = 0;
+}
+
+void signal_handler(int sig) {
+  if (sig == SIGINT)
+    running = 0;
+  else if (sig == SIGWINCH)
+    need_resize = 1;
 }
 
 struct termios orig_termios;
@@ -209,15 +276,19 @@ void reset_terminal_mode() {
 
 int init() {
   /*
-   * check that we are writing to a tty; register SIGINT and exit handlers; init
+   * check that we are writing to a tty; register signal and exit handlers; init
    * orig_termios (for proper resetting to cooked mode); and set raw mode.
    */
   if (!isatty(fileno(stdout))) {
     fprintf(stderr, "stdout is not a tty\n");
     return 1;
   }
-  if (signal(SIGINT, sigint_handler) != 0) {
+  if (signal(SIGINT, signal_handler) != 0) {
     fprintf(stderr, "Failed to set SIGINT handler: %s\n", strerror(errno));
+    return 1;
+  }
+  if (signal(SIGWINCH, signal_handler) != 0) {
+    fprintf(stderr, "Failed to set SIGWINCH handler: %s\n", strerror(errno));
     return 1;
   }
   if (tcgetattr(0, &orig_termios) != 0) {
@@ -241,16 +312,12 @@ int init() {
     return 1;
   }
 
-
-  /*
-   * init window dimensions. keep defaults on failure.
-   */
-  struct winsize w;
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) != -1) {
-    H = w.ws_row - 1;
-    W = w.ws_col;
+  // set window dims -- use defaults on failure.
+  if (set_window_dims() != 0) {
+    H = 10;
+    W = 10;
+    W0 = W + 1;
   }
-  W0 = W + 1;
 
   printf("\x1b[?25l");   // hide cursor.
   printf("\x1b[?1049h"); // switch to alternate screen.
