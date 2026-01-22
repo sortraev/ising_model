@@ -1,6 +1,6 @@
-// #include <time.h>    // time(), clock()
+#include <time.h>    // time()
 #include <stdio.h>   // printf()
-#include <stdlib.h>  // malloc(), rand()
+#include <stdlib.h>  // malloc(), rand(), srand()
 #include <unistd.h>  // usleep()
 #include <math.h>    // exp()
 #include <pthread.h> // pthread stuff
@@ -12,8 +12,8 @@
 
 #include <stdint.h>
 
-#define MAX(x, y) ((x) >  (y) ? (x) : (y))
-#define MIN(x, y) ((x) <= (y) ? (x) : (y))
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 typedef char spin;
 typedef char energy;
@@ -24,8 +24,8 @@ void update_spins(energy *energies, spin *spins);
 void render(spin *spins, char *screen);
 
 void *user_input_handler_thread(void *_unused);
-int init();
-void window_resize();
+int init(void);
+void window_resize(void);
 
 // visualization stuff.
 #define MIN_FPS 4
@@ -43,10 +43,12 @@ energy *energies = NULL;
 spin   *spins    = NULL;
 
 // simulation parameters.
-double T = 0.5;
-double P = 0.1;
+double T = M_PI;
+double P = 0.42;
 
-int main() {
+int do_pause = 0;
+
+int main(void) {
 
   if (init() != 0) {
     return 1;
@@ -69,6 +71,7 @@ int main() {
     usleep(1000000 / FPS);
     if (need_resize)
       window_resize();
+    while (do_pause);
   }
 
   free(spins);
@@ -89,11 +92,8 @@ void init_spins(spin *spins, size_t n) {
     ((int*)spins)[i] = r.as_int;
   }
 
-  size_t i = m * sizeof(int);
-  #pragma GCC unroll sizeof(int)
-  for (size_t k = 0; k < sizeof(int); k++)
-    if (i + k < n)
-      spins[i + k] = (rand() & 2) - 1;
+  for (size_t k = m * sizeof(int); k < n; k++)
+    spins[k] = (rand() & 2) - 1;
 }
 
 // compute energies for each spin based on its 8 neighbors.
@@ -152,7 +152,7 @@ void compute_energies(spin *spins, energy *energies) {
   }
 }
 
-float rand_uniform() {
+float rand_uniform(void) {
   return (float) rand() / RAND_MAX;
 }
 
@@ -189,28 +189,33 @@ void *user_input_handler_thread(void *_unused) {
   char c;
   while (running) {
     if (read(STDIN_FILENO, &c, 1) != 0) {
-      if (c == 'q') running = 0;
 
-      else if (c == 'z') P *= 0.99;
-      else if (c == 'Z') P = MAX(P - 0.1, 0.0);
+      switch (c) {
+        case 27: // escape key
+        case 'q':
+        case 'Q': running = 0;                 break;
 
-      else if (c == 'x') P = MIN(P * 1.01, 1.0);
-      else if (c == 'X') P = MIN(P + 0.1, 1.0);
+        case 'z': P *= 0.99;                   break;
+        case 'Z': P = MAX(P - 0.1, 0.0);       break;
+        case 'x': P = MIN(P * 1.01, 1.0);      break;
+        case 'X': P = MIN(P + 0.1, 1.0);       break;
 
-      else if (c == 'a') T *= 0.99;
-      else if (c == 'A') T = MAX(T - 0.1, 0.0);
+        case 'a': T *= 0.99;                   break;
+        case 'A': T = MAX(T - 0.1, 0.0);       break;
+        case 's': T *= 1.01;                   break;
+        case 'S': T += 0.1;                    break;
 
-      else if (c == 's') T *= 1.01;
-      else if (c == 'S') T += 0.1;
+        case 'd': FPS = MAX(FPS - 1, MIN_FPS); break;
+        case 'f': FPS = MIN(FPS + 1, MAX_FPS); break;
 
-      else if (c == 'd') FPS = MAX(FPS - 1, MIN_FPS);
-      else if (c == 'f') FPS = MIN(FPS + 1, MAX_FPS);
+        case 'p': do_pause = !do_pause;        break;
+      }
     }
   }
   return NULL;
 }
 
-int set_window_dims() {
+int set_window_dims(void) {
   struct winsize _winsize;
   if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &_winsize) == -1)
     return 1;
@@ -220,7 +225,7 @@ int set_window_dims() {
   return 0;
 }
 
-void window_resize() {
+void window_resize(void) {
   // update window dims, but first store the previous values.
   int H_prev = H;
   int W_prev = W;
@@ -262,19 +267,19 @@ void signal_handler(int sig) {
 }
 
 struct termios orig_termios;
-int set_terminal_raw_mode() {
+int set_terminal_raw_mode(void) {
   struct termios raw = orig_termios;
   raw.c_lflag &= ~(ECHO | ICANON);
   return tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-void reset_terminal_mode() {
+void reset_terminal_mode(void) {
   printf("\x1b[?1049l"); // switch back from alternate screen.
   printf("\x1b[?25h");   // show cursor.
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios); // restore term attributes.
 }
 
-int init() {
+int init(void) {
   /*
    * check that we are writing to a tty; register signal and exit handlers; init
    * orig_termios (for proper resetting to cooked mode); and set raw mode.
@@ -322,6 +327,6 @@ int init() {
   printf("\x1b[?25l");   // hide cursor.
   printf("\x1b[?1049h"); // switch to alternate screen.
 
-  srand(43);
+  srand(time(NULL));
   return 0;
 }
